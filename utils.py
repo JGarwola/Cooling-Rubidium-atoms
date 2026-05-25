@@ -6,10 +6,10 @@ Includes Lindblad dissipators, heat curvature, Liouvillian gap, and cycle heat c
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.linalg import null_space, solve as linsolve, svd, eig as eigenvalues
+from functools import wraps
 from matplotlib import rc
 rc('text', usetex=True)
 rc('font', family='sans-serif', serif=['Helvetica'], size=15)
-
 
 # Pauli Matrices
 sigma0 = np.array([[1, 0], [0, 1]], dtype=complex)
@@ -26,98 +26,157 @@ def lindblad_dissipator(L, rho):
     term2 = 0.5 * (L_dag @ L @ rho + rho @ L_dag @ L)
     return term1 - term2
 
+def old_heat_curvature(ham_func, h_target, diss_func, ranges, points=20):
+    """Numerical solver for heat curvature"""
+    # Setup Dimensions
+    H_test = ham_func(ranges[0][1], ranges[1][1])
+    d = H_test.shape[0]
+    d2 = d**2
+
+    # Vectorization
+    basis = np.eye(d2, d2).reshape(d2, d, d)
+    vec = lambda m: m.flatten()
+    unvec = lambda v: v.reshape(d, d)
+
+    def solve_l_response(L_mat, target_vec):
+        aug_mat = L_mat.copy()
+        aug_mat[0, :] = vec(np.identity(d))
+        aug_rhs = target_vec.copy()
+        aug_rhs[0] = 0
+        return linsolve(aug_mat, aug_rhs)
+
+    def get_curvature_point(p1_val, p2_val):
+        """Point-wise Curvature Kernel"""
+        p_vals = np.array([p1_val, p2_val])
+        step = np.abs(p_vals) * 1e-4
+        step[step == 0] = 1e-4
+
+        # Steady State at Center
+        H_tot = ham_func(*p_vals)
+        L_mat = np.zeros((d2, d2), dtype=complex)
+        for i, b in enumerate(basis):
+            L_mat[:, i] = vec(-1j * (H_tot @ b - b @ H_tot) + diss_func(b)(*p_vals))
+        
+        ns = null_space(L_mat)
+        rho_vec = ns[:, 0] if ns.shape[1] > 0 else svd(L_mat)[2][-1, :]
+        rho = unvec(rho_vec / np.trace(unvec(rho_vec)))
+        rho_vec = vec(rho)
+
+        # Compute Derivatives of H and rho
+        drho = np.zeros((2, d, d), dtype=complex)
+        dH = np.zeros((2, d, d), dtype=complex)
+
+        for i in range(2):
+            p_step = p_vals.copy()
+            p_step[i] += step[i]
+            H_step = ham_func(*p_step)
+            
+            L_mat_step = np.zeros((d2, d2), dtype=complex)
+            for j, b in enumerate(basis):
+                L_mat_step[:, j] = vec(-1j * (H_step @ b - b @ H_step) + diss_func(b)(*p_step))
+
+            dl_rho = -(L_mat_step @ rho_vec - L_mat @ rho_vec) / step[i]
+            drho[i, :, :] = unvec(solve_l_response(L_mat, dl_rho))
+            dH[i, :, :] = (H_step - H_tot) / step[i]
+
+        # Curvature Formula
+        return np.real(np.trace(dH[0] @ drho[1]) - np.trace(dH[1] @ drho[0]))
+
+    # Map Generation
+    p1_grid = np.linspace(ranges[0][1], ranges[0][2], points)
+    p2_grid = np.linspace(ranges[1][1], ranges[1][2], points)
+    
+    curvature_data = np.zeros((points, points))
+    for i, p1 in enumerate(p1_grid):
+        for j, p2 in enumerate(p2_grid):
+            curvature_data[j, i] = get_curvature_point(p1, p2)
+            
+    max_val = np.max(np.abs(curvature_data))
+    if max_val > 0:
+        curvature_data /= max_val
+
+    return p1_grid, p2_grid, curvature_data, max_val
 
 def heat_curvature(H_tot, H_ref, diss, ranges, points=20):
     """
     Numerical computation of heat curvature F^Q_{ij} = d_i A^Q_j - d_j A^Q_i
-    where A^Q_i = Tr(H_ref d_i rho_ss)
+    Using the deterministic trace-replacement trick for numerical stability.
     """
 
     def liouvillian(H, rho, diss_op):
-        """Compute L[rho] = -i[H, rho] + dissipator(rho)"""
         commutator = -1j * (H @ rho - rho @ H)
         return commutator + diss_op(rho)
 
     def get_steady_state(p_vals):
-        """Find steady state as null space of Liouvillian superoperator"""
+        """Find steady state by replacing the first row of L with Tr(rho) = 1"""
         H = H_tot(*p_vals)
         d = H.shape[0]
         d2 = d * d
         
-        # Build Liouvillian superoperator matrix: vec(L[ρ]) = L_mat @ vec(ρ)
+        # Build Liouvillian superoperator matrix
         L_mat = np.zeros((d2, d2), dtype=complex)
-        
         for col in range(d2):
-            # Create basis matrix e_ij (only one element = 1)
             e = np.zeros((d, d), dtype=complex)
             e[col // d, col % d] = 1.0
-            
-            # Apply Liouvillian: L[e]
             L_e = liouvillian(H, e, lambda r: diss(r)(*p_vals))
-            
-            # Vectorize and store as column
             L_mat[:, col] = L_e.flatten()
         
-        # Steady state is in null space of L_mat
-        ns = null_space(L_mat)
-        if ns.shape[1] > 0:
-            rho_vec = ns[:, 0]
-        else:
-            # Fallback: right singular vector corresponding to smallest singular value
-            _, _, Vh = svd(L_mat)
-            rho_vec = Vh[-1, :]
+        # Trace-replacement: replace row 0 with the vectorized identity matrix
+        M = L_mat.copy()
+        M[0, :] = 0.0
+        for k in range(d):
+            M[0, k * d + k] = 1.0  # Summing diagonal elements for Tr(rho)
         
-        # Unvec and normalize
-        rho = rho_vec.reshape(d, d)
-        trace = np.trace(rho)
-        if np.abs(trace) > 1e-10:
-            rho = rho / trace
-        else:
-            # Fallback to maximally mixed state if normalization fails
-            rho = np.eye(d) / d
+        # Right hand side: trace must equal 1, all other equations equal 0
+        b = np.zeros(d2, dtype=complex)
+        b[0] = 1.0
         
-        return rho
+        # Deterministic solver eliminates SVD gauge jumps
+        rho_vec = np.linalg.solve(M, b)
+        return rho_vec.reshape(d, d)
+
+    # Determine stable, uniform step sizes based on the parameter ranges
+    # Optimal step size for nested second derivatives is h ~ range * epsilon^(1/4)
+    h1 = 1e-3 * (ranges[0][2] - ranges[0][1])
+    h2 = 1e-3 * (ranges[1][2] - ranges[1][1])
+    global_step = np.array([h1, h2])
 
     def compute_A_Q(p_vals):
-        """Compute heat vector A^Q_i = Tr(H_ref d_i rho_ss)"""
-
-        H = H_tot(*p_vals)
+        """Compute heat vector A^Q using uniform global step sizes"""
         H_ref_val = H_ref(*p_vals)
-        rho_ss = get_steady_state(p_vals)
-        step = np.abs(p_vals) * 1e-6
+        d = H_ref_val.shape[0]
+        drho = np.zeros((2, d, d), dtype=complex)
         
-        # Compute d_i rho_ss using finite differences
-        drho = np.zeros((2, H.shape[0], H.shape[0]), dtype=complex)
         for i in range(2):
-            p_step = p_vals.copy()
-            p_step[i] += step[i]
-            rho_ss_step = get_steady_state(p_step)
-            drho[i] = (rho_ss_step - rho_ss) / step[i]
+            p_plus = p_vals.copy()
+            p_plus[i] += global_step[i]
+            p_minus = p_vals.copy()
+            p_minus[i] -= global_step[i]
+            
+            rho_ss_plus = get_steady_state(p_plus)
+            rho_ss_minus = get_steady_state(p_minus)
+            drho[i] = (rho_ss_plus - rho_ss_minus) / (2 * global_step[i])
         
-        # A^Q_i = Tr(H_ref d_i rho_ss)
         A_Q = np.array([np.real(np.trace(H_ref_val @ drho[i])) for i in range(2)])
         return A_Q
 
     def get_curvature_point(p1_val, p2_val):
-        """Compute curvature at a single point"""
-
         p_vals = np.array([p1_val, p2_val])
-        step = np.abs(p_vals) * 1e-6
-        
-        A_Q_center = compute_A_Q(p_vals)
-        
-        # Finite difference for d_i A^Q_j
         dA_Q = np.zeros((2, 2))
-        for i in range(2):
-            p_step = p_vals.copy()
-            p_step[i] += step[i]
-            A_Q_step = compute_A_Q(p_step)
-            dA_Q[i] = (A_Q_step - A_Q_center) / step[i]
         
-        # Curvature: F^Q = d_0 A^Q_1 - d_1 A^Q_0
+        for i in range(2):
+            p_plus = p_vals.copy()
+            p_plus[i] += global_step[i]
+            p_minus = p_vals.copy()
+            p_minus[i] -= global_step[i]
+            
+            A_Q_plus = compute_A_Q(p_plus)
+            A_Q_minus = compute_A_Q(p_minus)
+            dA_Q[i] = (A_Q_plus - A_Q_minus) / (2 * global_step[i])
+        
         return dA_Q[0, 1] - dA_Q[1, 0]
 
-    # Generate map
+    # Generate grid
     p1_grid = np.linspace(ranges[0][1], ranges[0][2], points)
     p2_grid = np.linspace(ranges[1][1], ranges[1][2], points)
     
@@ -190,7 +249,8 @@ def liouvillian_gap(ham_func, diss_func, params, ranges, points=25):
 
 
 def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi, points=50):
-    """Computes reversible and dissipative heat for a rectangular cycle."""
+    """Computes reversible and dissipative heat for a rectangular cycle.
+    Uses higher-precision central differences for numerical derivatives."""
 
     H_test = ham_func(*p_min)
     d = H_test.shape[0]
@@ -257,22 +317,29 @@ def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi,
         rho = rho / np.trace(rho)
         rho_vec = rho.flatten()
         
-        # Finite Difference for d_i(rho) and d_i(H)
-        step = 1e-6
+        # Higher-precision numerical differentiation (adaptive central differences)
+        step = np.abs(p_vals) * 1e-6
+        step = np.maximum(step, 1e-6)  # Ensure minimum step of 1e-6 for better accuracy
         drho = np.zeros((2, d, d), dtype=complex)
         dH = np.zeros((2, d, d), dtype=complex)
         
         for i in range(2):
-            p_step = p_vals.copy()
-            p_step[i] += step
-            H_step = ham_func(*p_step)
+            p_plus = p_vals.copy()
+            p_plus[i] += step[i]
+            p_minus = p_vals.copy()
+            p_minus[i] -= step[i]
             
-            # Build Liouvillian at perturbed point
-            L_mat_step = build_liouvillian_matrix(H_step, p_step)
+            H_plus = ham_func(*p_plus)
+            H_minus = ham_func(*p_minus)
             
-            dl_vec = -(L_mat_step @ rho_vec - L_mat @ rho_vec) / step
+            # Build Liouvillian at perturbed points
+            L_mat_plus = build_liouvillian_matrix(H_plus, p_plus)
+            L_mat_minus = build_liouvillian_matrix(H_minus, p_minus)
+            
+            # Compute derivatives using central differences
+            dl_vec = -(L_mat_plus @ rho_vec - L_mat_minus @ rho_vec) / (2 * step[i])
             drho[i, :, :] = solve_l_response(L_mat, dl_vec).reshape(d, d)
-            dH[i, :, :] = (H_step - H) / step
+            dH[i, :, :] = (H_plus - H_minus) / (2 * step[i])
 
         # Compute Metrics
         Ai = np.array([np.real(np.trace(H_ref @ drho[i])) for i in range(2)])
