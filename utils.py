@@ -248,9 +248,14 @@ def liouvillian_gap(ham_func, diss_func, params, ranges, points=25):
     return p1_range, p2_range, gap_data
 
 
-def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi, points=50):
+def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi, points=50, clockwise=False):
     """Computes reversible and dissipative heat for a rectangular cycle.
-    Uses higher-precision central differences for numerical derivatives."""
+    Uses higher-precision central differences for numerical derivatives.
+    
+    Parameters
+    ----------
+    clockwise : bool, optional
+        If False (default), traces counter-clockwise. If True, traces clockwise."""
 
     H_test = ham_func(*p_min)
     d = H_test.shape[0]
@@ -302,6 +307,10 @@ def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi,
         else:  # segment == 3
             p_vals = np.array([p_min[0], p_max[1] - local_t * (p_max[1] - p_min[1])])
             vel = np.array([0.0, -(p_max[1] - p_min[1])])
+        
+        # For clockwise, reverse the direction of traversal
+        if clockwise:
+            vel = -vel
 
         # Local Matrices
         H = ham_func(*p_vals)
