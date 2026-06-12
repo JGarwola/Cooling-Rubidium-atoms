@@ -202,7 +202,7 @@ def liouvillian_gap(ham_func, diss_func, params, ranges, points=25):
     # Grid Setup
     p1_range = np.linspace(ranges[0][1], ranges[0][2], points)
     p2_range = np.linspace(ranges[1][1], ranges[1][2], points)
-    gap_data = np.zeros((points, points))
+    gap_data = np.zeros([points, points])
 
     print(f"Computing Liouvillian Gap for {d}x{d} system...")
 
@@ -236,6 +236,8 @@ def liouvillian_gap(ham_func, diss_func, params, ranges, points=25):
 
     print(f"Liouvillian gap between {min(gap_data.flatten()):.2e} and {max(gap_data.flatten()):.2e}.")
 
+    gap_min = float(np.min(gap_data))
+
     # Visualization
     plt.figure(figsize=(8, 6))    
     cp = plt.contourf(p1_range, p2_range, gap_data, levels=20, cmap='viridis')
@@ -245,7 +247,7 @@ def liouvillian_gap(ham_func, diss_func, params, ranges, points=25):
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.show()
 
-    return p1_range, p2_range, gap_data
+    return gap_min
 
 
 def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi, points=50, clockwise=False):
@@ -363,7 +365,7 @@ def compute_cycle_heats(ham_func, ham_ref, diss_func, p_min, p_max, tau=2*np.pi,
     
     t_step = 4.0 / points
     q_geo = t_step * np.sum(grid_data[:, 0])
-    q_diss = (-1.0 / tau) * t_step * np.sum(grid_data[:, 1])
+    q_diss = (-4.0 / tau) * t_step * np.sum(grid_data[:, 1])
 
     print("--- Results ---")
     print(f"Geometric Heat: {q_geo}")
